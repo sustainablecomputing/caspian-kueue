@@ -127,19 +127,19 @@ func (s *Scheduler) GetJobs(count int) {
 			if jobNum <= 1 {
 				if choice < 1 {
 					err = s.AddNodeSelector(job.Name, job.Namespace, "high") //workloads.Items[0].Name
-					fmt.Println(err, job.Name, " scheduled on node groupe with carbon=high")
+					fmt.Println(job.Name, " scheduled on node groupe with carbon=high")
 				} else {
 					err = s.AddNodeSelector(job.Name, job.Namespace, "low")
-					fmt.Println(err, job.Name, " scheduled on node groupe with carbon=low")
+					fmt.Println(job.Name, " scheduled on node groupe with carbon=low")
 				}
 			} else {
 				if count > 1 {
 					if choice < 1 {
 						err = s.AddNodeSelector(job.Name, job.Namespace, "high") //workloads.Items[0].Name
-						fmt.Println(err, job.Name, " scheduled on node groupe with carbon=high")
+						fmt.Println(job.Name, " scheduled on node groupe with carbon=high")
 					} else {
 						err = s.AddNodeSelector(job.Name, job.Namespace, "low")
-						fmt.Println(err, job.Name, " scheduled on node groupe with carbon=low")
+						fmt.Println(job.Name, " scheduled on node groupe with carbon=low")
 					}
 				}
 			}
