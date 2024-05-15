@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"sort"
+	"strconv"
 
 	"github.com/lanl/clp"
 	core "github.com/sustainablecomputing/caspian/core"
+	mcadv1beta1 "github.com/tayebehbahreini/mcad/api/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -93,8 +95,7 @@ func NewScheduler(config *rest.Config, periodLength int) *Scheduler {
 // Calculate requested resources  of each AW.
 // Save all AWs with their characteristics in Jobs array
 func (s *Scheduler) GetJobs(count int) {
-	//cc := 0.0
-
+	s.N = 0
 	jobs := batchv1.JobList{}
 	s.Jobs = []core.Job{}
 
@@ -108,53 +109,79 @@ func (s *Scheduler) GetJobs(count int) {
 	}
 
 	fmt.Println("\nList of Jobs ")
-	fmt.Println("Name\t CPU\t GPU\t RemainTime  \t Deadline \t \t  Status ")
-	var jobNum int
-	jobNum = 0
-	stopPolicy := kueuev1beta1.Hold //"Hold"
-	if len(jobs.Items) > 0 {
-		err := s.UpdateQueuePoloicy("cq-1", stopPolicy)
-		if err != nil {
-			panic(err)
-		}
-	}
+	fmt.Println("Name\t CPU\t GPU\t RemainTime  \t Deadline ")
+
 	for _, job := range jobs.Items {
 
 		if len(job.Spec.Template.Spec.NodeSelector) == 0 {
-			jobNum = jobNum + 1
-			fmt.Println(job.Name)
-			choice := rand.IntN(3)
-			if jobNum <= 1 {
-				if choice < 1 {
-					err = s.AddNodeSelector(job.Name, job.Namespace, "high") //workloads.Items[0].Name
-					fmt.Println(job.Name, " scheduled on node groupe with carbon=high")
-				} else {
-					err = s.AddNodeSelector(job.Name, job.Namespace, "low")
-					fmt.Println(job.Name, " scheduled on node groupe with carbon=low")
-				}
-			} else {
-				if count > 1 {
-					if choice < 1 {
-						err = s.AddNodeSelector(job.Name, job.Namespace, "high") //workloads.Items[0].Name
-						fmt.Println(job.Name, " scheduled on node groupe with carbon=high")
-					} else {
-						err = s.AddNodeSelector(job.Name, job.Namespace, "low")
-						fmt.Println(job.Name, " scheduled on node groupe with carbon=low")
-					}
-				}
+
+			newJob := core.Job{
+				Name:       job.Name,
+				Namespace:  job.Namespace,
+				CPU:        2,          //temporaly value, to be modified later
+				GPU:        2,          //temporaly value, to be modified later
+				RemainTime: 3,          //temporaly value, to be modified later
+				Deadline:   int64(s.T), //temporaly value, to be modified later
 			}
+
+			s.N = s.N + 1
+			s.Jobs = append(s.Jobs, newJob)
+			fmt.Println(newJob.Name, "\t", newJob.CPU, "\t", newJob.GPU, "\t", newJob.RemainTime, "\t\t", newJob.Deadline)
 
 		}
 	}
-	stopPolicy = kueuev1beta1.None
-	if len(jobs.Items) > 0 {
-		err := s.UpdateQueuePoloicy("cq-1", stopPolicy)
-		if err != nil {
-			panic(err)
-		}
-	}
+
 }
-func (s *Scheduler) UpdateQueuePoloicy(Name string, Policy kueuev1beta1.StopPolicy) error {
+
+// get all clusterinfo
+func (s *Scheduler) GetClustersInfo() error {
+	s.Clusters = []core.Cluster{}
+	result := mcadv1beta1.ClusterInfoList{}
+	err := s.crdClient.
+		Get().
+		Resource("clusterinfo").
+		Do(context.Background()).
+		Into(&result)
+	if err != nil {
+		return err
+	}
+	j := 0
+	fmt.Println("\nList of Spoke Clusters ")
+	fmt.Println("Name \t Available CPU \t Available GPU \t GeoLocation  ")
+	local_Clusters := []core.Cluster{}
+	for _, cluster := range result.Items {
+		idle, _ := strconv.ParseFloat(cluster.Spec.PowerIdle, 64)
+		peak, _ := strconv.ParseFloat(cluster.Spec.PowerPeak, 64)
+		slope := (peak - idle) / 100.0
+		weight := core.NewWeights2(cluster.Status.Capacity)
+
+		newCluster := core.Cluster{
+			Name:        cluster.Name,
+			GeoLocation: cluster.Spec.Geolocation,
+			Carbon:      make([]float64, s.T),
+			CPU:         weight["cpu"],
+			GPU:         weight["nvidia.com/gpu"],
+			PowerSlope:  slope,
+		}
+		for t := 0; t < s.T; t++ {
+			newCluster.Carbon[t], _ = strconv.ParseFloat(cluster.Spec.Carbon[t], 64)
+		}
+		local_Clusters = append(local_Clusters, newCluster)
+		fmt.Println(newCluster.Name, "\t", newCluster.CPU, "\t\t", newCluster.GPU, "\t\t", newCluster.GeoLocation)
+
+		j = j + 1
+	}
+	s.M = len(result.Items)
+	for _, jj := range rand.Perm(s.M) {
+
+		s.Clusters = append(s.Clusters, local_Clusters[jj])
+	}
+	return err
+
+}
+
+// put/release hold on a clusterqueue
+func (s *Scheduler) UpdateQueuePoloicy(QueueName string, Policy kueuev1beta1.StopPolicy) error {
 
 	patch := []interface{}{
 		map[string]interface{}{
@@ -168,12 +195,13 @@ func (s *Scheduler) UpdateQueuePoloicy(Name string, Policy kueuev1beta1.StopPoli
 	if err != nil {
 		return err
 	}
-	err = s.crdClient.Patch(types.JSONPatchType).Resource("clusterqueues").Name(Name).Body(payload).Do(context.Background()).Error()
+	err = s.crdClient.Patch(types.JSONPatchType).Resource("clusterqueues").Name(QueueName).Body(payload).Do(context.Background()).Error()
 
 	return err
 }
 
-func (s *Scheduler) AddNodeSelector(Name string, NameSpace string, targetNode string) error {
+// Add target node to the spec of jobs
+func (s *Scheduler) AddNodeSelector(JobName string, NameSpace string, targetNode string) error {
 
 	var a [1]map[string]string
 	a[0] = map[string]string{"carbon": targetNode}
@@ -185,20 +213,56 @@ func (s *Scheduler) AddNodeSelector(Name string, NameSpace string, targetNode st
 			"value": a[0],
 		},
 	}
-
 	payload, err := json.Marshal(patch)
 	if err != nil {
 		return err
 	}
-	err = s.crdClient2.Patch(types.JSONPatchType).Resource("jobs").Name(Name).Namespace(NameSpace).Body(payload).Do(context.Background()).Error()
+	err = s.crdClient2.Patch(types.JSONPatchType).Resource("jobs").Name(JobName).Namespace(NameSpace).Body(payload).Do(context.Background()).Error()
 
 	return err
 
 }
 
 func (s *Scheduler) Schedule(optimizer string, count int) {
+	err := s.GetClustersInfo()
+	if err != nil {
+		print("Failed to get ClusterInfo")
+	}
 	s.GetJobs(count)
+	s.RandomOptimizer()
+	//Targets := s.Optimize(sustainable)//targets is a vector targets[i]=j means job i is assigend to node j
 
+}
+
+// randomOptimizer randomly assign jobs to the nodes
+func (s *Scheduler) RandomOptimizer() {
+	stopPolicy := kueuev1beta1.Hold //"Hold"
+	if s.N > 0 {
+		err := s.UpdateQueuePoloicy("cq-1", stopPolicy)
+		if err != nil {
+			panic(err)
+		}
+	}
+	for _, job := range s.Jobs {
+
+		choice := rand.IntN(5)
+
+		if choice < 1 {
+			s.AddNodeSelector(job.Name, job.Namespace, "high") //workloads.Items[0].Name
+			fmt.Println(job.Name, " scheduled on node groupe with carbon=high")
+		} else {
+			s.AddNodeSelector(job.Name, job.Namespace, "low")
+			fmt.Println(job.Name, " scheduled on node groupe with carbon=low")
+		}
+
+	}
+	stopPolicy = kueuev1beta1.None
+	if s.N > 0 {
+		err := s.UpdateQueuePoloicy("cq-1", stopPolicy)
+		if err != nil {
+			panic(err)
+		}
+	}
 }
 
 func (s *Scheduler) Optimize(sustainable bool) []int {
